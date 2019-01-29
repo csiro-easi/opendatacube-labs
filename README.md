@@ -18,7 +18,7 @@ Note: `--squash` is used to not store all history of the subtree.
 `git subtrees` work just like usual `git` with the exception of pushing changes to the parent and pulling changes from the parent.
 
 
-### Creation of a new experiment with develop:
+### Creation of a new experiment:
 
 Create a new branch in `csiro-easi/opendatacube-labs` as per usual:
 * `git clone git@github.com:csiro-easi/opendatacube-labs.git`
