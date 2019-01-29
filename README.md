@@ -26,10 +26,8 @@ Create a new branch in `csiro-easi/opendatacube-labs` as per usual:
 * `git push origin <new_branch>`
 
 
-### Replacing provided `develop` branch with another branch
+### Create subtree of `datacube-core` with desired branch
 
-* `git rm datacube-core`
-* `git commit`
 * `git subtree add --prefix=datacube-core git@github.com:csiro-easi/datacube-core.git <branch> --squash`
 * `git add datacube-core`
 * `git commit`
