@@ -8,6 +8,8 @@ from typing import Union, Optional, Dict, Tuple
 import numpy
 import xarray
 from dask import array as da
+from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import cpu_count
 
 from datacube.config import LocalConfig
 from datacube.storage import reproject_and_fuse, BandInfo
@@ -372,6 +374,76 @@ class Datacube(object):
             # print('Done {} - {}'.format(mreq[ix:ix+max_bands], endx-startx))
             tmp = 0
             progress(ix, len(mreq))
+        return data
+
+    #: pylint: disable=too-many-arguments, too-many-locals
+    def load_hyper_mp(self, product=None, measurements=None, output_crs=None, resolution=None, resampling=None,
+                      skip_broken_datasets=False, dask_chunks=None, like=None, fuse_func=None, align=None,
+                      datasets=None, max_bands=1, **query):
+        """
+            Example:
+
+                import datacube
+                dc = datacube.Datacube()
+                query = {
+                    'product': 'HYMAP',
+                    'time': ('2002-10-01', '2002-10-30'),
+                    'measurements': ['453', '467']
+                }
+
+                a = dc.load_hyper_mp(**query)
+        """
+        def progress(count, total, suffix=''):
+            bar_len = 60
+            filled_len = int(round(bar_len * count / float(total)))
+            percents = round(100.0 * count / float(total), 1)
+            bar = '=' * filled_len + '-' * (bar_len - filled_len)
+            sys.stdout.write('[%s] %s%s ...%s\r' % (bar, percents, '%', suffix))
+            sys.stdout.flush()
+
+        if 'stack' in query:
+            raise DeprecationWarning("the `stack` keyword argument is not supported anymore, "
+                                     "please apply `xarray.Dataset.to_array()` to the result instead")
+
+        # TODO: get rid of this block when removing legacy load support
+        legacy_args = {}
+        use_threads = query.pop('use_threads', None)
+        if use_threads is not None:
+            legacy_args['use_threads'] = use_threads
+
+        observations = datasets or self.find_datasets(product=product, like=like, ensure_location=True, **query)
+        if not observations:
+            return xarray.Dataset()
+
+        geobox = output_geobox(like=like, output_crs=output_crs, resolution=resolution, align=align,
+                               grid_spec=self.index.products.get_by_name(product).grid_spec,
+                               datasets=observations, **query)
+
+        group_by = query_group_by(**query)
+        grouped = self.group_datasets(observations, group_by)
+
+        datacube_product = self.index.products.get_by_name(product)
+        measurement_dicts = datacube_product.lookup_measurements(measurements)
+
+        measurements_lists = list(measurement_dicts.values())
+        data = self.create_storage_hyper(grouped.coords, geobox, measurements_lists)
+
+        hyper_bid = self.list_measurements()['name'].loc['HYMAP'].tolist()
+        mreq = measurements or hyper_bid
+        progress(0, len(mreq))
+
+        def work(idx):
+            tmp = self.load(**query, product=product, measurements=mreq[idx:idx+max_bands])
+            for t in range(0, data.time.size):
+                for band in tmp.data_vars:
+                    data.hyper[t].loc[float(band)] = tmp[band][t]
+            tmp = None
+
+        with ThreadPoolExecutor(max_workers=cpu_count()) as executor:
+            for ix in range(0, len(mreq), max_bands):
+                executor.submit(work, ix)
+                progress(ix, len(mreq))
+
         return data
 
     def find_datasets(self, **search_terms):
