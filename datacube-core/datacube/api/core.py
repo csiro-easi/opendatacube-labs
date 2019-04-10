@@ -1,4 +1,6 @@
 import uuid
+import sys
+import time
 from collections import OrderedDict
 from itertools import groupby
 from typing import Union, Optional, Dict, Tuple
@@ -304,6 +306,74 @@ class Datacube(object):
 
         return apply_aliases(result, datacube_product, measurements)
 
+    #: pylint: disable=too-many-arguments, too-many-locals
+    def load_hyper(self, product=None, measurements=None, output_crs=None, resolution=None, resampling=None,
+                   skip_broken_datasets=False, dask_chunks=None, like=None, fuse_func=None, align=None, datasets=None,
+                   max_bands=20, **query):
+        """
+            Example:
+
+                import datacube
+                dc = datacube.Datacube()
+                query = {
+                    'product': 'HYMAP',
+                    'time': ('2002-10-01', '2002-10-30'),
+                    'measurements': ['453', '467']
+                }
+
+                a = dc.load_hyper(**query)
+        """
+        def progress(count, total, suffix=''):
+            bar_len = 60
+            filled_len = int(round(bar_len * count / float(total)))
+            percents = round(100.0 * count / float(total), 1)
+            bar = '=' * filled_len + '-' * (bar_len - filled_len)
+            sys.stdout.write('[%s] %s%s ...%s\r' % (bar, percents, '%', suffix))
+            sys.stdout.flush()
+
+        if 'stack' in query:
+            raise DeprecationWarning("the `stack` keyword argument is not supported anymore, "
+                                     "please apply `xarray.Dataset.to_array()` to the result instead")
+
+        # TODO: get rid of this block when removing legacy load support
+        legacy_args = {}
+        use_threads = query.pop('use_threads', None)
+        if use_threads is not None:
+            legacy_args['use_threads'] = use_threads
+
+        observations = datasets or self.find_datasets(product=product, like=like, ensure_location=True, **query)
+        if not observations:
+            return xarray.Dataset()
+
+        geobox = output_geobox(like=like, output_crs=output_crs, resolution=resolution, align=align,
+                               grid_spec=self.index.products.get_by_name(product).grid_spec,
+                               datasets=observations, **query)
+
+        group_by = query_group_by(**query)
+        grouped = self.group_datasets(observations, group_by)
+
+        datacube_product = self.index.products.get_by_name(product)
+        measurement_dicts = datacube_product.lookup_measurements(measurements)
+
+        measurements_lists = list(measurement_dicts.values())
+        data = self.create_storage_hyper(grouped.coords, geobox, measurements_lists)
+
+        hyper_bid = self.list_measurements()['name'].loc['HYMAP'].tolist()
+        mreq = measurements or hyper_bid
+        progress(0, len(mreq))
+        # Todo: thread this
+        for ix in range(0, len(mreq), max_bands):
+            startx = time.time()
+            tmp = self.load(**query, product=product, measurements=mreq[ix:ix+max_bands])
+            for t in range(0, data.time.size):
+                for band in tmp.data_vars:
+                    data.hyper[t].loc[float(band)] = tmp[band][t]
+            endx = time.time()
+            # print('Done {} - {}'.format(mreq[ix:ix+max_bands], endx-startx))
+            tmp = 0
+            progress(ix, len(mreq))
+        return data
+
     def find_datasets(self, **search_terms):
         """
         Search the index and return all datasets for a product matching the search terms.
@@ -436,6 +506,29 @@ class Datacube(object):
             dims = tuple(coords.keys()) + tuple(geobox.dimensions)
             result[measurement.name] = (dims, data, attrs)
 
+        return result
+
+    @staticmethod
+    def create_storage_hyper(coords, geobox, measurements, data_func=None):
+        def empty_func(measurement_):
+            coord_shape = tuple(coord_.size for coord_ in coords.values())
+            return numpy.full(coord_shape + (len(measurements),) + geobox.shape, measurement_.nodata,
+                              dtype=measurement_.dtype)
+
+        data_func = data_func or empty_func
+
+        result = xarray.Dataset(attrs={'crs': geobox.crs})
+        for name, coord in coords.items():
+            result[name] = coord
+        result['wvl'] = [float(m['name']) for m in measurements]
+        for name, coord in geobox.coordinates.items():
+            result[name] = (name, coord.values, {'units': coord.units})
+
+        data = data_func(measurements[0])
+        attrs = measurements[0].dataarray_attrs()
+        attrs['crs'] = geobox.crs
+        dims = tuple(coords.keys()) + ('wvl',) + tuple(geobox.dimensions)
+        result['hyper'] = (dims, data, attrs)
         return result
 
     @staticmethod
