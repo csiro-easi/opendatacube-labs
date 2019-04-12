@@ -360,20 +360,19 @@ class Datacube(object):
         measurements_lists = list(measurement_dicts.values())
         data = self.create_storage_hyper(grouped.coords, geobox, measurements_lists)
 
-        hyper_bid = self.list_measurements()['name'].loc['HYMAP'].tolist()
-        mreq = measurements or hyper_bid
-        progress(0, len(mreq))
-        # Todo: thread this
-        for ix in range(0, len(mreq), max_bands):
-            startx = time.time()
-            tmp = self.load(**query, product=product, measurements=mreq[ix:ix+max_bands])
+        progress(0, len(measurement_dicts))
+        for idx, measurement in enumerate(measurement_dicts):
+            tmp = self.load_data(grouped, geobox,
+                                 [measurement_dicts[measurement]],
+                                 resampling=resampling,
+                                 fuse_func=fuse_func,
+                                 dask_chunks=dask_chunks,
+                                 skip_broken_datasets=skip_broken_datasets,
+                                 **legacy_args)
             for t in range(0, data.time.size):
                 for band in tmp.data_vars:
-                    data.hyper[t].loc[float(band)] = tmp[band][t]
-            endx = time.time()
-            # print('Done {} - {}'.format(mreq[ix:ix+max_bands], endx-startx))
-            tmp = 0
-            progress(ix, len(mreq))
+                    data.spectra[t].loc[float(band)] = tmp[band][t]
+            progress(idx, len(measurement_dicts))
         return data
 
     #: pylint: disable=too-many-arguments, too-many-locals
@@ -428,22 +427,23 @@ class Datacube(object):
         measurements_lists = list(measurement_dicts.values())
         data = self.create_storage_hyper(grouped.coords, geobox, measurements_lists)
 
-        hyper_bid = self.list_measurements()['name'].loc['HYMAP'].tolist()
-        mreq = measurements or hyper_bid
-        progress(0, len(mreq))
-
-        def work(idx):
-            tmp = self.load(**query, product=product, measurements=mreq[idx:idx+max_bands])
+        def work(measurement):
+            tmp = self.load_data(grouped, geobox,
+                                 measurement,
+                                 resampling=resampling,
+                                 fuse_func=fuse_func,
+                                 dask_chunks=dask_chunks,
+                                 skip_broken_datasets=skip_broken_datasets,
+                                 **legacy_args)
             for t in range(0, data.time.size):
                 for band in tmp.data_vars:
-                    data.hyper[t].loc[float(band)] = tmp[band][t]
-            tmp = None
+                    data.spectra[t].loc[float(band)] = tmp[band][t]
 
+        progress(0, len(measurement_dicts))
         with ThreadPoolExecutor(max_workers=cpu_count()) as executor:
-            for ix in range(0, len(mreq), max_bands):
-                executor.submit(work, ix)
-                progress(ix, len(mreq))
-
+            for idx, measurement in enumerate(measurement_dicts):
+                executor.submit(work, [measurement_dicts[measurement].copy()])
+                progress(idx, len(measurement_dicts))
         return data
 
     def find_datasets(self, **search_terms):
@@ -600,7 +600,7 @@ class Datacube(object):
         attrs = measurements[0].dataarray_attrs()
         attrs['crs'] = geobox.crs
         dims = tuple(coords.keys()) + ('wvl',) + tuple(geobox.dimensions)
-        result['hyper'] = (dims, data, attrs)
+        result['spectra'] = (dims, data, attrs)
         return result
 
     @staticmethod
