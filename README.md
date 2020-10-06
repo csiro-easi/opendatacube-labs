@@ -1,3 +1,8 @@
+> This repository is no longer maintained here.
+> Further development occurs in https://dev.azure.com/csiro-easi/easi-hub.
+
+----
+
 # opendatacube-labs
 Experimental datacube development with strong potential for breaking changes and obscure features.
 
